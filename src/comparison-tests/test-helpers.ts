@@ -80,20 +80,43 @@ export async function runRealBash(
 }
 
 /**
+ * Normalizes whitespace in output for comparison.
+ * Useful for commands like `wc` where BSD and GNU have different column widths.
+ */
+function normalizeWhitespace(str: string): string {
+  return str
+    .split("\n")
+    .map((line) => line.trim().replace(/\s+/g, " "))
+    .join("\n");
+}
+
+/**
  * Compares BashEnv output with real bash output
  */
 export async function compareOutputs(
   env: BashEnv,
   testDir: string,
   command: string,
-  options?: { compareStderr?: boolean; compareExitCode?: boolean },
+  options?: {
+    compareStderr?: boolean;
+    compareExitCode?: boolean;
+    normalizeWhitespace?: boolean;
+  },
 ): Promise<void> {
   const [bashEnvResult, realBashResult] = await Promise.all([
     env.exec(command),
     runRealBash(command, testDir),
   ]);
 
-  if (bashEnvResult.stdout !== realBashResult.stdout) {
+  let bashEnvStdout = bashEnvResult.stdout;
+  let realBashStdout = realBashResult.stdout;
+
+  if (options?.normalizeWhitespace) {
+    bashEnvStdout = normalizeWhitespace(bashEnvStdout);
+    realBashStdout = normalizeWhitespace(realBashStdout);
+  }
+
+  if (bashEnvStdout !== realBashStdout) {
     throw new Error(
       `stdout mismatch for "${command}"\n` +
         `Expected (real bash): ${JSON.stringify(realBashResult.stdout)}\n` +

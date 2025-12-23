@@ -17,26 +17,30 @@ describe("wc command - Real Bash Comparison", () => {
     await cleanupTestDir(testDir);
   });
 
+  // Note: normalizeWhitespace is needed because BSD (macOS) and GNU (Linux) wc
+  // have different column width formatting, but the actual values are the same
+  const wcOptions = { normalizeWhitespace: true };
+
   describe("default output (lines, words, chars)", () => {
     it("should match full wc output", async () => {
       const env = await setupFiles(testDir, {
         "test.txt": "line 1\nline 2\nline 3\n",
       });
-      await compareOutputs(env, testDir, "wc test.txt");
+      await compareOutputs(env, testDir, "wc test.txt", wcOptions);
     });
 
     it("should handle file without trailing newline", async () => {
       const env = await setupFiles(testDir, {
         "test.txt": "no newline",
       });
-      await compareOutputs(env, testDir, "wc test.txt");
+      await compareOutputs(env, testDir, "wc test.txt", wcOptions);
     });
 
     it("should handle empty file", async () => {
       const env = await setupFiles(testDir, {
         "empty.txt": "",
       });
-      await compareOutputs(env, testDir, "wc empty.txt");
+      await compareOutputs(env, testDir, "wc empty.txt", wcOptions);
     });
   });
 
@@ -45,12 +49,17 @@ describe("wc command - Real Bash Comparison", () => {
       const env = await setupFiles(testDir, {
         "test.txt": "line 1\nline 2\nline 3\n",
       });
-      await compareOutputs(env, testDir, "wc -l test.txt");
+      await compareOutputs(env, testDir, "wc -l test.txt", wcOptions);
     });
 
     it("should count lines from stdin", async () => {
       const env = await setupFiles(testDir, {});
-      await compareOutputs(env, testDir, 'echo -e "a\\nb\\nc" | wc -l');
+      await compareOutputs(
+        env,
+        testDir,
+        'echo -e "a\\nb\\nc" | wc -l',
+        wcOptions,
+      );
     });
   });
 
@@ -59,14 +68,14 @@ describe("wc command - Real Bash Comparison", () => {
       const env = await setupFiles(testDir, {
         "test.txt": "one two three\nfour five\n",
       });
-      await compareOutputs(env, testDir, "wc -w test.txt");
+      await compareOutputs(env, testDir, "wc -w test.txt", wcOptions);
     });
 
     it("should count words with multiple spaces", async () => {
       const env = await setupFiles(testDir, {
         "test.txt": "one    two   three\n",
       });
-      await compareOutputs(env, testDir, "wc -w test.txt");
+      await compareOutputs(env, testDir, "wc -w test.txt", wcOptions);
     });
   });
 
@@ -75,7 +84,7 @@ describe("wc command - Real Bash Comparison", () => {
       const env = await setupFiles(testDir, {
         "test.txt": "hello world\n",
       });
-      await compareOutputs(env, testDir, "wc -c test.txt");
+      await compareOutputs(env, testDir, "wc -c test.txt", wcOptions);
     });
   });
 
@@ -85,7 +94,7 @@ describe("wc command - Real Bash Comparison", () => {
         "a.txt": "file a\n",
         "b.txt": "file b line 1\nfile b line 2\n",
       });
-      await compareOutputs(env, testDir, "wc a.txt b.txt");
+      await compareOutputs(env, testDir, "wc a.txt b.txt", wcOptions);
     });
 
     it("should show -l for multiple files", async () => {
@@ -93,7 +102,7 @@ describe("wc command - Real Bash Comparison", () => {
         "a.txt": "line 1\nline 2\n",
         "b.txt": "line 1\nline 2\nline 3\n",
       });
-      await compareOutputs(env, testDir, "wc -l a.txt b.txt");
+      await compareOutputs(env, testDir, "wc -l a.txt b.txt", wcOptions);
     });
   });
 
@@ -102,26 +111,31 @@ describe("wc command - Real Bash Comparison", () => {
       const env = await setupFiles(testDir, {
         "test.txt": "one two three\nfour five\n",
       });
-      await compareOutputs(env, testDir, "wc -lw test.txt");
+      await compareOutputs(env, testDir, "wc -lw test.txt", wcOptions);
     });
 
     it("should match -wc output", async () => {
       const env = await setupFiles(testDir, {
         "test.txt": "hello world\n",
       });
-      await compareOutputs(env, testDir, "wc -wc test.txt");
+      await compareOutputs(env, testDir, "wc -wc test.txt", wcOptions);
     });
   });
 
   describe("stdin", () => {
     it("should count stdin input", async () => {
       const env = await setupFiles(testDir, {});
-      await compareOutputs(env, testDir, 'echo "hello world" | wc');
+      await compareOutputs(env, testDir, 'echo "hello world" | wc', wcOptions);
     });
 
     it("should count -l from stdin", async () => {
       const env = await setupFiles(testDir, {});
-      await compareOutputs(env, testDir, 'echo -e "a\\nb\\nc" | wc -l');
+      await compareOutputs(
+        env,
+        testDir,
+        'echo -e "a\\nb\\nc" | wc -l',
+        wcOptions,
+      );
     });
   });
 });
