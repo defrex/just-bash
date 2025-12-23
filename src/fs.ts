@@ -21,7 +21,7 @@ export class VirtualFs implements IFileSystem {
 
   constructor(initialFiles?: Record<string, string>) {
     // Create root directory
-    this.data.set('/', { type: 'directory', mode: 0o755 });
+    this.data.set('/', { type: 'directory', mode: 0o755, mtime: new Date() });
 
     if (initialFiles) {
       for (const [path, content] of Object.entries(initialFiles)) {
@@ -78,7 +78,7 @@ export class VirtualFs implements IFileSystem {
 
     if (!this.data.has(dir)) {
       this.ensureParentDirs(dir);
-      this.data.set(dir, { type: 'directory', mode: 0o755 });
+      this.data.set(dir, { type: 'directory', mode: 0o755, mtime: new Date() });
     }
   }
 
@@ -86,7 +86,7 @@ export class VirtualFs implements IFileSystem {
   writeFileSync(path: string, content: string): void {
     const normalized = this.normalizePath(path);
     this.ensureParentDirs(normalized);
-    this.data.set(normalized, { type: 'file', content, mode: 0o644 });
+    this.data.set(normalized, { type: 'file', content, mode: 0o644, mtime: new Date() });
   }
 
   // Async public API
@@ -132,10 +132,15 @@ export class VirtualFs implements IFileSystem {
       throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
     }
 
+    // Calculate size: for files, it's the content length; for directories, it's 0
+    const size = entry.type === 'file' && entry.content ? entry.content.length : 0;
+
     return {
       isFile: entry.type === 'file',
       isDirectory: entry.type === 'directory',
       mode: entry.mode,
+      size,
+      mtime: entry.mtime || new Date(),
     };
   }
 
@@ -170,7 +175,7 @@ export class VirtualFs implements IFileSystem {
       }
     }
 
-    this.data.set(normalized, { type: 'directory', mode: 0o755 });
+    this.data.set(normalized, { type: 'directory', mode: 0o755, mtime: new Date() });
   }
 
   async readdir(path: string): Promise<string[]> {

@@ -21,6 +21,8 @@ export interface FsStat {
   isFile: boolean;
   isDirectory: boolean;
   mode: number;
+  size: number;
+  mtime: Date;
 }
 
 /**

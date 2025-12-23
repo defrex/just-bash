@@ -180,3 +180,8 @@ Redirection & composition (used constantly)
 && / || — conditional chaining
 
 xargs — build argument lists
+
+## Implementation phase 9
+
+- Implement ln, hard and soft-links in the virtual fs
+- Should we have a global help command?

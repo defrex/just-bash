@@ -11,6 +11,8 @@ export interface CommandContext {
   cwd: string;
   env: Record<string, string>;
   stdin: string;
+  /** Optional exec function for commands that need to run subcommands (like xargs) */
+  exec?: (command: string) => Promise<ExecResult>;
 }
 
 export interface Command {

@@ -29,6 +29,9 @@ import { dirnameCommand } from './commands/dirname/dirname.js';
 import { teeCommand } from './commands/tee/tee.js';
 import { xargsCommand } from './commands/xargs/xargs.js';
 import { envCommand, printenvCommand } from './commands/env/env.js';
+import { treeCommand } from './commands/tree/tree.js';
+import { statCommand } from './commands/stat/stat.js';
+import { duCommand } from './commands/du/du.js';
 
 export interface BashEnvOptions {
   /**
@@ -52,6 +55,10 @@ export interface BashEnvOptions {
   fs?: IFileSystem;
 }
 
+// Protection limits
+const MAX_CALL_DEPTH = 100;
+const MAX_COMMAND_COUNT = 10000;
+
 export class BashEnv {
   private fs: IFileSystem;
   private cwd: string;
@@ -63,6 +70,9 @@ export class BashEnv {
   private useDefaultLayout: boolean = false;
   // Stack of local variable scopes for function calls
   private localScopes: Map<string, string | undefined>[] = [];
+  // Protection against endless execution
+  private callDepth: number = 0;
+  private commandCount: number = 0;
 
   constructor(options: BashEnvOptions = {}) {
     // Use provided filesystem or create a new VirtualFs
@@ -128,6 +138,9 @@ export class BashEnv {
     this.registerCommand(xargsCommand);
     this.registerCommand(envCommand);
     this.registerCommand(printenvCommand);
+    this.registerCommand(treeCommand);
+    this.registerCommand(statCommand);
+    this.registerCommand(duCommand);
   }
 
   registerCommand(command: Command): void {
@@ -144,6 +157,21 @@ export class BashEnv {
   }
 
   async exec(commandLine: string): Promise<ExecResult> {
+    // Reset command count for top-level calls
+    if (this.callDepth === 0) {
+      this.commandCount = 0;
+    }
+
+    // Protection against too many commands
+    this.commandCount++;
+    if (this.commandCount > MAX_COMMAND_COUNT) {
+      return {
+        stdout: '',
+        stderr: 'bash: maximum command count exceeded (possible infinite loop)\n',
+        exitCode: 1,
+      };
+    }
+
     // Handle empty command
     if (!commandLine.trim()) {
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -153,6 +181,21 @@ export class BashEnv {
     const trimmed = commandLine.trim();
     if (trimmed.startsWith('if ') || trimmed.startsWith('if;') || trimmed === 'if') {
       return this.executeIfStatement(trimmed);
+    }
+
+    // Check for for loops
+    if (trimmed.startsWith('for ')) {
+      return this.executeForLoop(trimmed);
+    }
+
+    // Check for while loops
+    if (trimmed.startsWith('while ')) {
+      return this.executeWhileLoop(trimmed);
+    }
+
+    // Check for until loops
+    if (trimmed.startsWith('until ')) {
+      return this.executeUntilLoop(trimmed);
     }
 
     // Check for function definitions
@@ -369,6 +412,152 @@ export class BashEnv {
     return null;
   }
 
+  /**
+   * Execute a for loop
+   * Syntax: for VAR in LIST; do COMMANDS; done
+   */
+  private async executeForLoop(input: string): Promise<ExecResult> {
+    // Parse: for VAR in LIST; do COMMANDS; done
+    // Allow empty list (no space needed after "in" if list is empty)
+    const match = input.match(/^for\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s*(.*?)\s*;\s*do\s+(.*?)\s*;\s*done\s*$/s);
+    if (!match) {
+      // Try without semicolons before do
+      const match2 = input.match(/^for\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s*(.*?)\s+do\s+(.*?)\s*;\s*done\s*$/s);
+      if (!match2) {
+        return { stdout: '', stderr: 'bash: syntax error near for loop\n', exitCode: 2 };
+      }
+      const [, varName, listStr, body] = match2;
+      return this.executeForLoopBody(varName, listStr, body);
+    }
+    const [, varName, listStr, body] = match;
+    return this.executeForLoopBody(varName, listStr, body);
+  }
+
+  private async executeForLoopBody(varName: string, listStr: string, body: string): Promise<ExecResult> {
+    // Expand the list (could be a glob, command substitution, or literal)
+    const items = listStr.trim().split(/\s+/).filter(s => s.length > 0);
+
+    let stdout = '';
+    let stderr = '';
+    let exitCode = 0;
+    let iterations = 0;
+    const maxIterations = 10000;
+
+    for (const item of items) {
+      if (iterations++ >= maxIterations) {
+        return { stdout, stderr: stderr + 'bash: for loop: too many iterations\n', exitCode: 1 };
+      }
+
+      // Set the loop variable
+      this.env[varName] = item;
+
+      // Execute the body
+      const result = await this.exec(body);
+      stdout += result.stdout;
+      stderr += result.stderr;
+      exitCode = result.exitCode;
+    }
+
+    // Clean up the loop variable
+    delete this.env[varName];
+
+    return { stdout, stderr, exitCode };
+  }
+
+  /**
+   * Execute a while loop
+   * Syntax: while CONDITION; do COMMANDS; done
+   */
+  private async executeWhileLoop(input: string): Promise<ExecResult> {
+    // Parse: while CONDITION; do COMMANDS; done
+    const match = input.match(/^while\s+(.*?)\s*;\s*do\s+(.*?)\s*;\s*done\s*$/s);
+    if (!match) {
+      const match2 = input.match(/^while\s+(.*?)\s+do\s+(.*?)\s*;\s*done\s*$/s);
+      if (!match2) {
+        return { stdout: '', stderr: 'bash: syntax error near while loop\n', exitCode: 2 };
+      }
+      const [, condition, body] = match2;
+      return this.executeWhileLoopBody(condition, body);
+    }
+    const [, condition, body] = match;
+    return this.executeWhileLoopBody(condition, body);
+  }
+
+  private async executeWhileLoopBody(condition: string, body: string): Promise<ExecResult> {
+    let stdout = '';
+    let stderr = '';
+    let exitCode = 0;
+    let iterations = 0;
+    const maxIterations = 10000;
+
+    while (true) {
+      if (iterations++ >= maxIterations) {
+        return { stdout, stderr: stderr + 'bash: while loop: too many iterations\n', exitCode: 1 };
+      }
+
+      // Evaluate the condition
+      const condResult = await this.exec(condition);
+      if (condResult.exitCode !== 0) {
+        break; // Condition failed, exit loop
+      }
+
+      // Execute the body
+      const result = await this.exec(body);
+      stdout += result.stdout;
+      stderr += result.stderr;
+      exitCode = result.exitCode;
+    }
+
+    return { stdout, stderr, exitCode };
+  }
+
+  /**
+   * Execute an until loop
+   * Syntax: until CONDITION; do COMMANDS; done
+   */
+  private async executeUntilLoop(input: string): Promise<ExecResult> {
+    // Parse: until CONDITION; do COMMANDS; done
+    const match = input.match(/^until\s+(.*?)\s*;\s*do\s+(.*?)\s*;\s*done\s*$/s);
+    if (!match) {
+      const match2 = input.match(/^until\s+(.*?)\s+do\s+(.*?)\s*;\s*done\s*$/s);
+      if (!match2) {
+        return { stdout: '', stderr: 'bash: syntax error near until loop\n', exitCode: 2 };
+      }
+      const [, condition, body] = match2;
+      return this.executeUntilLoopBody(condition, body);
+    }
+    const [, condition, body] = match;
+    return this.executeUntilLoopBody(condition, body);
+  }
+
+  private async executeUntilLoopBody(condition: string, body: string): Promise<ExecResult> {
+    let stdout = '';
+    let stderr = '';
+    let exitCode = 0;
+    let iterations = 0;
+    const maxIterations = 10000;
+
+    while (true) {
+      if (iterations++ >= maxIterations) {
+        return { stdout, stderr: stderr + 'bash: until loop: too many iterations\n', exitCode: 1 };
+      }
+
+      // Evaluate the condition
+      const condResult = await this.exec(condition);
+      if (condResult.exitCode === 0) {
+        break; // Condition succeeded, exit loop (opposite of while)
+      }
+
+      // Execute the body
+      const result = await this.exec(body);
+      stdout += result.stdout;
+      stderr += result.stderr;
+      exitCode = result.exitCode;
+    }
+
+    return { stdout, stderr, exitCode };
+  }
+
   private async executePipeline(pipeline: Pipeline, initialStdin: string): Promise<ExecResult> {
     let stdin = initialStdin;
     let lastResult: ExecResult = { stdout: '', stderr: '', exitCode: 0 };
@@ -477,6 +666,17 @@ export class BashEnv {
     // Check for user-defined functions first
     const funcBody = this.functions.get(expandedCommand);
     if (funcBody) {
+      // Protection against infinite recursion
+      this.callDepth++;
+      if (this.callDepth > MAX_CALL_DEPTH) {
+        this.callDepth--;
+        return {
+          stdout: '',
+          stderr: `bash: ${expandedCommand}: maximum recursion depth exceeded\n`,
+          exitCode: 1,
+        };
+      }
+
       // Push a new local scope for this function call
       this.localScopes.push(new Map());
 
@@ -489,6 +689,9 @@ export class BashEnv {
 
       // Execute the function body
       const result = await this.exec(funcBody);
+
+      // Decrement call depth
+      this.callDepth--;
 
       // Pop the local scope and restore shadowed variables
       const localScope = this.localScopes.pop()!;
@@ -531,6 +734,7 @@ export class BashEnv {
       cwd: this.cwd,
       env: this.env,
       stdin,
+      exec: this.exec.bind(this),
     };
 
     let result: ExecResult;

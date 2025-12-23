@@ -174,6 +174,7 @@ export const grepCommand: Command = {
     let stdout = '';
     let stderr = '';
     let anyMatch = false;
+    let anyError = false;
 
     // Collect all files to search (expand globs first)
     const filesToSearch: string[] = [];
@@ -249,17 +250,21 @@ export const grepCommand: Command = {
         }
       } catch {
         stderr += `grep: ${file}: No such file or directory\n`;
+        anyError = true;
       }
     }
 
+    // Exit codes: 0 = match found, 1 = no match, 2 = error
+    const exitCode = anyError ? 2 : anyMatch ? 0 : 1;
+
     if (quietMode) {
-      return { stdout: '', stderr: '', exitCode: anyMatch ? 0 : 1 };
+      return { stdout: '', stderr: '', exitCode };
     }
 
     return {
       stdout,
       stderr,
-      exitCode: anyMatch ? 0 : 1,
+      exitCode,
     };
   },
 };
