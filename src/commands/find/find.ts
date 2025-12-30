@@ -25,6 +25,7 @@ const findHelp = {
     "-perm /MODE      any permission bits MODE are set",
     "-maxdepth LEVELS descend at most LEVELS directories",
     "-mindepth LEVELS do not apply tests at levels less than LEVELS",
+    "-depth           process directory contents before directory itself",
     "-prune           do not descend into this directory",
     "-not, !          negate the following expression",
     "-a, -and         logical AND (default)",
@@ -62,18 +63,27 @@ export const findCommand: Command = {
       return showHelp(findHelp);
     }
 
-    let searchPath = ".";
+    const searchPaths: string[] = [];
     let maxDepth: number | null = null;
     let minDepth: number | null = null;
+    let depthFirst = false;
 
-    // Find the path argument and parse -maxdepth/-mindepth
+    // Find all path arguments and parse -maxdepth/-mindepth/-depth
+    // Paths come before any predicates (arguments starting with -)
+    let expressionsStarted = false;
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
       if (arg === "-maxdepth" && i + 1 < args.length) {
+        expressionsStarted = true;
         maxDepth = parseInt(args[++i], 10);
       } else if (arg === "-mindepth" && i + 1 < args.length) {
+        expressionsStarted = true;
         minDepth = parseInt(args[++i], 10);
+      } else if (arg === "-depth") {
+        expressionsStarted = true;
+        depthFirst = true;
       } else if (arg === "-exec") {
+        expressionsStarted = true;
         // Skip -exec and all arguments until terminator (; or +)
         i++;
         while (i < args.length && args[i] !== ";" && args[i] !== "+") {
@@ -90,11 +100,27 @@ export const findCommand: Command = {
         arg !== "\\)" &&
         arg !== "!"
       ) {
-        searchPath = arg;
+        // This is a path if we haven't started expressions yet
+        if (!expressionsStarted) {
+          searchPaths.push(arg);
+        }
       } else if (PREDICATES_WITH_ARGS_SET.has(arg)) {
+        expressionsStarted = true;
         // Skip value arguments for predicates that take arguments
         i++;
+      } else if (
+        arg.startsWith("-") ||
+        arg === "(" ||
+        arg === "\\(" ||
+        arg === "!"
+      ) {
+        expressionsStarted = true;
       }
+    }
+
+    // Default to current directory if no paths specified
+    if (searchPaths.length === 0) {
+      searchPaths.push(".");
     }
 
     // Parse expressions
@@ -111,20 +137,9 @@ export const findCommand: Command = {
     // Determine if we should use default printing (when no actions at all)
     const useDefaultPrint = actions.length === 0;
 
-    const basePath = ctx.fs.resolvePath(ctx.cwd, searchPath);
-
-    // Check if path exists
-    try {
-      await ctx.fs.stat(basePath);
-    } catch {
-      return {
-        stdout: "",
-        stderr: `find: ${searchPath}: No such file or directory\n`,
-        exitCode: 1,
-      };
-    }
-
     const results: string[] = [];
+    let stderr = "";
+    let exitCode = 0;
 
     // Collect and resolve -newer reference file mtimes
     const newerRefPaths = collectNewerRefs(expr);
@@ -140,107 +155,151 @@ export const findCommand: Command = {
       }
     }
 
-    // Recursive function to find files
-    async function findRecursive(
-      currentPath: string,
-      depth: number,
-    ): Promise<void> {
-      // Check maxdepth - don't descend beyond this depth
-      if (maxDepth !== null && depth > maxDepth) {
-        return;
-      }
+    // Process each search path
+    for (const searchPath of searchPaths) {
+      const basePath = ctx.fs.resolvePath(ctx.cwd, searchPath);
 
-      let stat: Awaited<ReturnType<typeof ctx.fs.stat>> | undefined;
+      // Check if path exists
       try {
-        stat = await ctx.fs.stat(currentPath);
+        await ctx.fs.stat(basePath);
       } catch {
-        return;
-      }
-      if (!stat) return;
-
-      // For the starting directory, use the search path itself as the name
-      // (e.g., when searching from '.', the name should be '.')
-      let name: string;
-      if (currentPath === basePath) {
-        name = searchPath.split("/").pop() || searchPath;
-      } else {
-        name = currentPath.split("/").pop() || "";
+        stderr += `find: ${searchPath}: No such file or directory\n`;
+        exitCode = 1;
+        continue;
       }
 
-      const relativePath =
-        currentPath === basePath
-          ? searchPath
-          : searchPath === "."
-            ? `./${currentPath.slice(basePath.length + 1)}`
-            : searchPath + currentPath.slice(basePath.length);
+      // Recursive function to find files
+      async function findRecursive(
+        currentPath: string,
+        depth: number,
+      ): Promise<void> {
+        // Check maxdepth - don't descend beyond this depth
+        if (maxDepth !== null && depth > maxDepth) {
+          return;
+        }
 
-      // For directories, get entries once and reuse for both isEmpty check and recursion
-      let entries: string[] | null = null;
-      if (stat.isDirectory) {
-        entries = await ctx.fs.readdir(currentPath);
-      }
+        let stat: Awaited<ReturnType<typeof ctx.fs.stat>> | undefined;
+        try {
+          stat = await ctx.fs.stat(currentPath);
+        } catch {
+          return;
+        }
+        if (!stat) return;
 
-      // Determine if entry is empty
-      const isEmpty = stat.isFile
-        ? stat.size === 0
-        : entries !== null && entries.length === 0;
-
-      // Check if this entry matches our criteria
-      // Only apply tests if we're at or beyond mindepth
-      const atOrBeyondMinDepth = minDepth === null || depth >= minDepth;
-      let matches = atOrBeyondMinDepth;
-      let shouldPrune = false;
-
-      let shouldPrint = false;
-      if (matches && expr !== null) {
-        const evalCtx: EvalContext = {
-          name,
-          relativePath,
-          isFile: stat.isFile,
-          isDirectory: stat.isDirectory,
-          isEmpty,
-          mtime: stat.mtime?.getTime() ?? Date.now(),
-          size: stat.size ?? 0,
-          mode: stat.mode ?? 0o644,
-          newerRefTimes,
-        };
-        const evalResult = evaluateExpressionWithPrune(expr, evalCtx);
-        matches = evalResult.matches;
-        shouldPrune = evalResult.pruned;
-
-        // Determine if this path should be printed:
-        // - If there's an explicit -print, only print when it was triggered
-        // - Otherwise, use default printing (print everything that matches)
-        if (hasExplicitPrint) {
-          shouldPrint = evalResult.printed;
+        // For the starting directory, use the search path itself as the name
+        // (e.g., when searching from '.', the name should be '.')
+        let name: string;
+        if (currentPath === basePath) {
+          name = searchPath.split("/").pop() || searchPath;
         } else {
-          shouldPrint = matches;
+          name = currentPath.split("/").pop() || "";
         }
-      } else if (matches) {
-        // No expression, default print
-        shouldPrint = true;
+
+        const relativePath =
+          currentPath === basePath
+            ? searchPath
+            : searchPath === "."
+              ? `./${currentPath.slice(basePath.length + 1)}`
+              : searchPath + currentPath.slice(basePath.length);
+
+        // For directories, get entries once and reuse for both isEmpty check and recursion
+        let entries: string[] | null = null;
+        if (stat.isDirectory) {
+          entries = await ctx.fs.readdir(currentPath);
+        }
+
+        // Determine if entry is empty
+        const isEmpty = stat.isFile
+          ? stat.size === 0
+          : entries !== null && entries.length === 0;
+
+        // Helper to process current entry
+        const processEntry = (): void => {
+          // Check if this entry matches our criteria
+          // Only apply tests if we're at or beyond mindepth
+          const atOrBeyondMinDepth = minDepth === null || depth >= minDepth;
+          let matches = atOrBeyondMinDepth;
+
+          let shouldPrint = false;
+          if (matches && expr !== null) {
+            const evalCtx: EvalContext = {
+              name,
+              relativePath,
+              isFile: stat.isFile,
+              isDirectory: stat.isDirectory,
+              isEmpty,
+              mtime: stat.mtime?.getTime() ?? Date.now(),
+              size: stat.size ?? 0,
+              mode: stat.mode ?? 0o644,
+              newerRefTimes,
+            };
+            const evalResult = evaluateExpressionWithPrune(expr, evalCtx);
+            matches = evalResult.matches;
+
+            // Determine if this path should be printed:
+            // - If there's an explicit -print, only print when it was triggered
+            // - Otherwise, use default printing (print everything that matches)
+            if (hasExplicitPrint) {
+              shouldPrint = evalResult.printed;
+            } else {
+              shouldPrint = matches;
+            }
+          } else if (matches) {
+            // No expression, default print
+            shouldPrint = true;
+          }
+
+          if (shouldPrint) {
+            results.push(relativePath);
+          }
+        };
+
+        // Helper to recurse into children
+        const recurseChildren = async (): Promise<void> => {
+          if (entries !== null) {
+            for (const entry of entries) {
+              const childPath =
+                currentPath === "/" ? `/${entry}` : `${currentPath}/${entry}`;
+              await findRecursive(childPath, depth + 1);
+            }
+          }
+        };
+
+        // Check for pruning (only when not in depth-first mode)
+        let shouldPrune = false;
+        if (!depthFirst && expr !== null) {
+          const evalCtx: EvalContext = {
+            name,
+            relativePath,
+            isFile: stat.isFile,
+            isDirectory: stat.isDirectory,
+            isEmpty,
+            mtime: stat.mtime?.getTime() ?? Date.now(),
+            size: stat.size ?? 0,
+            mode: stat.mode ?? 0o644,
+            newerRefTimes,
+          };
+          const evalResult = evaluateExpressionWithPrune(expr, evalCtx);
+          shouldPrune = evalResult.pruned;
+        }
+
+        if (depthFirst) {
+          // Process children first, then this entry
+          await recurseChildren();
+          processEntry();
+        } else {
+          // Process this entry first, then children (if not pruned)
+          processEntry();
+          if (!shouldPrune) {
+            await recurseChildren();
+          }
+        }
       }
 
-      if (shouldPrint) {
-        results.push(relativePath);
-      }
-
-      // Recurse into directories (reuse entries from above)
-      // Don't recurse if -prune was triggered
-      if (entries !== null && !shouldPrune) {
-        for (const entry of entries) {
-          const childPath =
-            currentPath === "/" ? `/${entry}` : `${currentPath}/${entry}`;
-          await findRecursive(childPath, depth + 1);
-        }
-      }
+      await findRecursive(basePath, 0);
     }
 
-    await findRecursive(basePath, 0);
-
     let stdout = "";
-    let stderr = "";
-    let exitCode = 0;
 
     // Execute actions if any
     if (actions.length > 0) {

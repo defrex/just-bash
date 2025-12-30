@@ -145,6 +145,8 @@ export function parseExpressions(
     } else if (arg === "-maxdepth" || arg === "-mindepth") {
       // These are handled separately, skip them
       i++;
+    } else if (arg === "-depth") {
+      // Handled separately in find.ts, skip it
     } else if (arg === "-exec") {
       // Parse -exec command {} ; or -exec command {} +
       const commandParts: string[] = [];

@@ -12,8 +12,8 @@ describe("find -exec", () => {
       });
       const result = await env.exec('find /dir -name "*.txt" -exec cat {} \\;');
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("content a");
-      expect(result.stdout).toContain("content b");
+      expect(result.stdout).toBe("content acontent b");
+      expect(result.stderr).toBe("");
     });
 
     it("should execute echo for each file", async () => {
@@ -27,9 +27,10 @@ describe("find -exec", () => {
         'find /dir -name "*.txt" -exec echo Found: {} \\;',
       );
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("Found:");
-      expect(result.stdout).toContain("file1.txt");
-      expect(result.stdout).toContain("file2.txt");
+      expect(result.stdout).toBe(
+        "Found: /dir/file1.txt\nFound: /dir/file2.txt\n",
+      );
+      expect(result.stderr).toBe("");
     });
 
     it("should handle multiple {} replacements", async () => {
@@ -40,8 +41,8 @@ describe("find -exec", () => {
         'find /dir -name "test.txt" -exec echo {} is {} \\;',
       );
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("test.txt is");
-      expect(result.stdout).toContain("test.txt");
+      expect(result.stdout).toBe("/dir/test.txt is /dir/test.txt\n");
+      expect(result.stderr).toBe("");
     });
 
     it("should propagate command exit codes", async () => {
@@ -68,11 +69,8 @@ describe("find -exec", () => {
       const result = await env.exec('find /dir -name "*.txt" -exec echo {} +');
       expect(result.exitCode).toBe(0);
       // All files should be in a single echo output
-      const lines = result.stdout.trim().split("\n");
-      expect(lines.length).toBe(1);
-      expect(result.stdout).toContain("a.txt");
-      expect(result.stdout).toContain("b.txt");
-      expect(result.stdout).toContain("c.txt");
+      expect(result.stdout).toBe("/dir/a.txt /dir/b.txt /dir/c.txt\n");
+      expect(result.stderr).toBe("");
     });
 
     it("should work with ls command in batch mode", async () => {
@@ -84,8 +82,8 @@ describe("find -exec", () => {
       });
       const result = await env.exec("find /dir -type f -exec ls {} +");
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("file1.txt");
-      expect(result.stdout).toContain("file2.txt");
+      expect(result.stdout).toBe("/dir/file1.txt\n\n/dir/file2.txt\n");
+      expect(result.stderr).toBe("");
     });
   });
 
@@ -140,7 +138,8 @@ describe("find -exec", () => {
         'find /dir -type f -name "*.txt" -exec cat {} \\;',
       );
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("content");
+      expect(result.stdout).toBe("content");
+      expect(result.stderr).toBe("");
     });
 
     it("should work with -maxdepth", async () => {

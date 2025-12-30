@@ -13,10 +13,8 @@ describe("find -perm", () => {
       });
       const result = await env.exec("find /test -type f -perm 644");
       expect(result.exitCode).toBe(0);
-      const files = result.stdout.trim().split("\n").sort();
-      expect(files).toContain("/test/file1.txt");
-      expect(files).toContain("/test/file3.txt");
-      expect(files).not.toContain("/test/file2.txt");
+      expect(result.stdout).toBe("/test/file1.txt\n/test/file3.txt\n");
+      expect(result.stderr).toBe("");
     });
 
     it("finds files with exact permission 755", async () => {
@@ -44,10 +42,8 @@ describe("find -perm", () => {
       // -100 means user execute must be set (0o100 = 64)
       const result = await env.exec("find /test -type f -perm -100");
       expect(result.exitCode).toBe(0);
-      const files = result.stdout.trim().split("\n").sort();
-      expect(files).toContain("/test/exec.sh");
-      expect(files).toContain("/test/other.sh");
-      expect(files).not.toContain("/test/data.txt");
+      expect(result.stdout).toBe("/test/exec.sh\n/test/other.sh\n");
+      expect(result.stderr).toBe("");
     });
 
     it("finds files with user+group read", async () => {
@@ -77,11 +73,11 @@ describe("find -perm", () => {
       // /111 means any execute bit (user, group, or other)
       const result = await env.exec("find /test -type f -perm /111");
       expect(result.exitCode).toBe(0);
-      const files = result.stdout.trim().split("\n").sort();
-      expect(files).toContain("/test/user_exec.sh");
-      expect(files).toContain("/test/group_exec.sh");
-      expect(files).toContain("/test/other_exec.sh");
-      expect(files).not.toContain("/test/no_exec.txt");
+      expect(result.stdout).toBe(`/test/group_exec.sh
+/test/other_exec.sh
+/test/user_exec.sh
+`);
+      expect(result.stderr).toBe("");
     });
   });
 });
