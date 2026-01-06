@@ -462,6 +462,13 @@ describe("AGENTS.npm.md validation", () => {
           "/data/data.csv": "name,category,value\nalice,A,10\nbob,B,20\n",
           "/src/app.ts": "// TODO: implement\nexport const x = 1;",
           "/src/lib.ts": "// helper\nexport const y = 2;",
+          // Mock type definition files for "Discovering Types" examples
+          "/data/node_modules/just-bash/dist/index.d.ts":
+            'export { Bash } from "./Bash";\nexport type { BashOptions } from "./Bash";',
+          "/data/node_modules/just-bash/dist/Bash.d.ts":
+            "export interface BashOptions {\n  files?: Record<string, string>;\n  cwd?: string;\n  env?: Record<string, string>;\n}\nexport interface ExecResult {\n  stdout: string;\n  stderr: string;\n  exitCode: number;\n}\nexport class Bash {\n  constructor(options?: BashOptions);\n  exec(command: string): Promise<ExecResult>;\n}",
+          "/data/node_modules/just-bash/dist/ai/index.d.ts":
+            "export interface CreateBashToolOptions {\n  files?: Record<string, string>;\n  network?: { allowedUrlPrefixes: string[] };\n}\nexport function createBashTool(options?: CreateBashToolOptions): Tool;",
         },
         cwd: "/data",
       });

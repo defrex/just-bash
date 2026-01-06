@@ -206,3 +206,30 @@ Common exit codes:
 - Network access requires explicit URL allowlists
 - Execution limits prevent infinite loops
 - No shell injection possible (commands are parsed, not eval'd)
+
+## Discovering Types
+
+TypeScript types are available in the `.d.ts` files. Use JSDoc-style exploration to understand the API:
+
+```bash
+# Find all type definition files
+find node_modules/just-bash/dist -name "*.d.ts" | head -20
+
+# View main exports and their types
+cat node_modules/just-bash/dist/index.d.ts
+
+# View Bash class options
+grep -A 30 "interface BashOptions" node_modules/just-bash/dist/Bash.d.ts
+
+# View AI tool options
+cat node_modules/just-bash/dist/ai/index.d.ts
+
+# Search for specific types
+grep -r "interface.*Options" node_modules/just-bash/dist/*.d.ts
+```
+
+Key types to explore:
+- `BashOptions` - Constructor options for `new Bash()`
+- `ExecResult` - Return type of `bash.exec()`
+- `CreateBashToolOptions` - Options for `createBashTool()`
+- `InitialFiles` - File specification format
