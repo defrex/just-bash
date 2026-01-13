@@ -76,6 +76,9 @@ export class OverlayFs implements IFileSystem {
   private readonly readOnly: boolean;
   private readonly memory: Map<string, MemoryEntry> = new Map();
   private readonly deleted: Set<string> = new Set();
+  // Cache stat results from real filesystem (files don't change during operation)
+  private readonly statCache: Map<string, FsStat> = new Map();
+  private readonly lstatCache: Map<string, FsStat> = new Map();
 
   constructor(options: OverlayFsOptions) {
     // Resolve to absolute path
@@ -493,9 +496,15 @@ export class OverlayFs implements IFileSystem {
       throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
     }
 
+    // Check stat cache first (files on disk don't change during operation)
+    const cached = this.statCache.get(realPath);
+    if (cached) {
+      return cached;
+    }
+
     try {
       const stat = await fs.promises.stat(realPath);
-      return {
+      const result: FsStat = {
         isFile: stat.isFile(),
         isDirectory: stat.isDirectory(),
         isSymbolicLink: false,
@@ -503,6 +512,9 @@ export class OverlayFs implements IFileSystem {
         size: stat.size,
         mtime: stat.mtime,
       };
+      // Cache the result
+      this.statCache.set(realPath, result);
+      return result;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
@@ -553,9 +565,15 @@ export class OverlayFs implements IFileSystem {
       throw new Error(`ENOENT: no such file or directory, lstat '${path}'`);
     }
 
+    // Check lstat cache first
+    const cached = this.lstatCache.get(realPath);
+    if (cached) {
+      return cached;
+    }
+
     try {
       const stat = await fs.promises.lstat(realPath);
-      return {
+      const result: FsStat = {
         isFile: stat.isFile(),
         isDirectory: stat.isDirectory(),
         isSymbolicLink: stat.isSymbolicLink(),
@@ -563,6 +581,9 @@ export class OverlayFs implements IFileSystem {
         size: stat.size,
         mtime: stat.mtime,
       };
+      // Cache the result
+      this.lstatCache.set(realPath, result);
+      return result;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(`ENOENT: no such file or directory, lstat '${path}'`);

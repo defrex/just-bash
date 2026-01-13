@@ -11,7 +11,7 @@ import type {
 import type { IFileSystem } from "../fs/interface.js";
 import type { ExecutionLimits } from "../limits.js";
 import type { SecureFetch } from "../network/index.js";
-import type { CommandRegistry, ExecResult } from "../types.js";
+import type { CommandRegistry, ExecResult, TraceCallback } from "../types.js";
 
 export interface ShellOptions {
   /** set -e: Exit immediately if a command exits with non-zero status */
@@ -82,4 +82,6 @@ export interface InterpreterContext {
   fetch?: SecureFetch;
   /** Optional sleep function for testing with mock clocks */
   sleep?: (ms: number) => Promise<void>;
+  /** Optional trace callback for performance profiling */
+  trace?: TraceCallback;
 }

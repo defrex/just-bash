@@ -1,8 +1,72 @@
 import type { DirentEntry } from "../../fs/interface.js";
-import type { Command, CommandContext, ExecResult } from "../../types.js";
+import type {
+  Command,
+  CommandContext,
+  ExecResult,
+  TraceCallback,
+} from "../../types.js";
 
 // Use a larger batch size for find to maximize parallel I/O
 const FIND_BATCH_SIZE = 500;
+
+// Tracing helpers
+interface TraceCounters {
+  readdirCalls: number;
+  readdirTime: number;
+  statCalls: number;
+  statTime: number;
+  evalCalls: number;
+  evalTime: number;
+  nodeCount: number;
+  batchCount: number;
+  batchTime: number;
+  earlyPrunes: number;
+}
+
+function createTraceCounters(): TraceCounters {
+  return {
+    readdirCalls: 0,
+    readdirTime: 0,
+    statCalls: 0,
+    statTime: 0,
+    evalCalls: 0,
+    evalTime: 0,
+    nodeCount: 0,
+    batchCount: 0,
+    batchTime: 0,
+    earlyPrunes: 0,
+  };
+}
+
+function emitTraceSummary(
+  trace: TraceCallback,
+  counters: TraceCounters,
+  totalMs: number,
+): void {
+  trace({
+    category: "find",
+    name: "summary",
+    durationMs: totalMs,
+    details: {
+      readdirCalls: counters.readdirCalls,
+      readdirTimeMs: counters.readdirTime,
+      statCalls: counters.statCalls,
+      statTimeMs: counters.statTime,
+      evalCalls: counters.evalCalls,
+      evalTimeMs: counters.evalTime,
+      nodeCount: counters.nodeCount,
+      batchCount: counters.batchCount,
+      batchTimeMs: counters.batchTime,
+      earlyPrunes: counters.earlyPrunes,
+      otherTimeMs:
+        totalMs -
+        counters.readdirTime -
+        counters.statTime -
+        counters.evalTime -
+        counters.batchTime,
+    },
+  });
+}
 
 import { hasHelpFlag, showHelp } from "../help.js";
 import {
@@ -13,11 +77,16 @@ import {
 import {
   collectNewerRefs,
   evaluateExpressionWithPrune,
+  evaluateForEarlyPrune,
+  evaluateSimpleExpression,
+  expressionHasPrune,
   expressionNeedsEmptyCheck,
   expressionNeedsStatMetadata,
+  extractPathPruningHints,
+  isSimpleExpression,
 } from "./matcher.js";
 import { parseExpressions } from "./parser.js";
-import type { EvalContext } from "./types.js";
+import type { EvalContext, EvalResult } from "./types.js";
 
 const findHelp = {
   name: "find",
@@ -186,12 +255,33 @@ export const findCommand: Command = {
       }
     }
 
+    // Check if printf format needs stat metadata
+    // Simple directives: %f %h %p %P %d %% don't need stat
+    // Stat-dependent: %s %m %M %t %T need stat
+    const printfNeedsStat = actions.some((a) => {
+      if (a.type !== "printf") return false;
+      // Check for stat-dependent directives: %s %m %M %t %T
+      // But skip escaped %% and handle width/precision modifiers like %10s or %-5.2s
+      const format = a.format.replace(/%%/g, "");
+      return /%[-+]?[0-9]*\.?[0-9]*(s|m|M|t|T)/.test(format);
+    });
+
     // Check if expression needs full stat metadata (optimization)
     const needsStatMetadata =
-      expressionNeedsStatMetadata(expr) || hasPrintfAction;
+      expressionNeedsStatMetadata(expr) || printfNeedsStat;
 
     // Check if expression uses -empty (needs to read directories to count entries)
     const needsEmptyCheck = expressionNeedsEmptyCheck(expr);
+
+    // Extract path pattern pruning hints (for patterns like "*/pulls/*.json")
+    const pathPruningHints = extractPathPruningHints(expr);
+
+    // Check if expression has -prune (for early prune optimization)
+    const hasPruneExpr = expressionHasPrune(expr);
+
+    // Check if expression is simple (only name/path/type/prune/print)
+    // Simple expressions can use the fast-path that avoids EvalContext allocation
+    const isSimpleExpr = isSimpleExpression(expr);
 
     // Check if readdirWithFileTypes is available (for optimization)
     const hasReaddirWithFileTypes =
@@ -236,11 +326,16 @@ export const findCommand: Command = {
         pruned: boolean;
       }
 
+      // Tracing counters
+      const traceCounters = createTraceCounters();
+      const traceStartTime = Date.now();
+
       // Process a single node: get stat, children, check prune
       async function processNode(
         item: WorkItem,
       ): Promise<ProcessedNode | null> {
         const { path: currentPath, depth, typeInfo } = item;
+        traceCounters.nodeCount++;
 
         // Check maxdepth
         if (maxDepth !== null && depth > maxDepth) {
@@ -257,7 +352,10 @@ export const findCommand: Command = {
           isDirectory = typeInfo.isDirectory;
         } else {
           try {
+            const statStart = Date.now();
             stat = await ctx.fs.stat(currentPath);
+            traceCounters.statCalls++;
+            traceCounters.statTime += Date.now() - statStart;
           } catch {
             return null;
           }
@@ -286,18 +384,47 @@ export const findCommand: Command = {
         let entriesWithTypes: DirentEntry[] | null = null;
         let entries: string[] | null = null;
 
+        // Early prune optimization: check if we can skip this directory before readdir
+        // This avoids reading directory contents for directories that will be pruned
+        let earlyPruned = false;
+        if (isDirectory && hasPruneExpr && !depthFirst) {
+          const earlyResult = evaluateForEarlyPrune(expr, {
+            name,
+            relativePath,
+            isFile,
+            isDirectory,
+          });
+          earlyPruned = earlyResult.shouldPrune;
+          if (earlyPruned) {
+            traceCounters.earlyPrunes++;
+          }
+        }
+
         // Optimization: skip reading directory contents if we're at maxdepth
         // Exception: if -empty is used, we need to read to check if directory is empty
         const atMaxDepth = maxDepth !== null && depth >= maxDepth;
-        const shouldDescend = !atMaxDepth;
-        const shouldReadDir = shouldDescend || needsEmptyCheck;
+        // Path pattern pruning: for patterns like "*/pulls/*.json", don't descend into "pulls" subdirs
+        // But we still need to read the directory to check its direct children (files)
+        const inTerminalDir =
+          pathPruningHints.terminalDirName !== null &&
+          name === pathPruningHints.terminalDirName;
+        const shouldDescendIntoSubdirs =
+          !atMaxDepth && !inTerminalDir && !earlyPruned;
+        const shouldReadDir =
+          (shouldDescendIntoSubdirs || needsEmptyCheck || inTerminalDir) &&
+          !earlyPruned;
 
         if (isDirectory && shouldReadDir) {
+          const readdirStart = Date.now();
           if (hasReaddirWithFileTypes && ctx.fs.readdirWithFileTypes) {
             entriesWithTypes = await ctx.fs.readdirWithFileTypes(currentPath);
             entries = entriesWithTypes.map((e) => e.name);
-            // Only create children if we should descend (not at maxdepth)
-            if (shouldDescend) {
+            traceCounters.readdirCalls++;
+            traceCounters.readdirTime += Date.now() - readdirStart;
+            // Create children work items
+            // In terminal directory (e.g., "pulls" for pattern "*/pulls/*.json"),
+            // only process files, not subdirectories
+            if (shouldDescendIntoSubdirs) {
               children = entriesWithTypes.map((entry, idx) => ({
                 path:
                   currentPath === "/"
@@ -310,11 +437,35 @@ export const findCommand: Command = {
                 },
                 resultIndex: idx,
               }));
+            } else if (inTerminalDir) {
+              // Only include files (not subdirectories) as children
+              // Also filter by extension if we have that hint
+              const extFilter = pathPruningHints.requiredExtension;
+              children = entriesWithTypes
+                .filter(
+                  (entry) =>
+                    entry.isFile &&
+                    (!extFilter || entry.name.endsWith(extFilter)),
+                )
+                .map((entry, idx) => ({
+                  path:
+                    currentPath === "/"
+                      ? `/${entry.name}`
+                      : `${currentPath}/${entry.name}`,
+                  depth: depth + 1,
+                  typeInfo: {
+                    isFile: entry.isFile,
+                    isDirectory: entry.isDirectory,
+                  },
+                  resultIndex: idx,
+                }));
             }
           } else {
             entries = await ctx.fs.readdir(currentPath);
-            // Only create children if we should descend (not at maxdepth)
-            if (shouldDescend) {
+            traceCounters.readdirCalls++;
+            traceCounters.readdirTime += Date.now() - readdirStart;
+            // Create children work items
+            if (shouldDescendIntoSubdirs) {
               children = entries.map((entry, idx) => ({
                 path:
                   currentPath === "/" ? `/${entry}` : `${currentPath}/${entry}`,
@@ -322,6 +473,9 @@ export const findCommand: Command = {
                 resultIndex: idx,
               }));
             }
+            // Note: when inTerminalDir and no readdirWithFileTypes,
+            // we can't filter by type, so we process all children
+            // (they'll be filtered during evaluation anyway)
           }
         }
 
@@ -329,9 +483,12 @@ export const findCommand: Command = {
           ? (stat?.size ?? 0) === 0
           : entries !== null && entries.length === 0;
 
-        // Check for pruning (only in pre-order mode)
-        let pruned = false;
-        if (!depthFirst && expr !== null) {
+        // Check for pruning (only in pre-order mode when expression has -prune)
+        // If we already early-pruned, use that result
+        // Skip this evaluation entirely if there's no -prune in the expression
+        let pruned = earlyPruned;
+        if (!depthFirst && expr !== null && !earlyPruned && hasPruneExpr) {
+          const evalStart = Date.now();
           const evalCtx: EvalContext = {
             name,
             relativePath,
@@ -345,6 +502,8 @@ export const findCommand: Command = {
           };
           const evalResult = evaluateExpressionWithPrune(expr, evalCtx);
           pruned = evalResult.pruned;
+          traceCounters.evalCalls++;
+          traceCounters.evalTime += Date.now() - evalStart;
         }
 
         return {
@@ -370,20 +529,37 @@ export const findCommand: Command = {
         let shouldPrint = false;
 
         if (matches && expr !== null) {
-          const evalCtx: EvalContext = {
-            name: node.name,
-            relativePath: node.relativePath,
-            isFile: node.isFile,
-            isDirectory: node.isDirectory,
-            isEmpty: node.isEmpty,
-            mtime: node.stat?.mtime?.getTime() ?? Date.now(),
-            size: node.stat?.size ?? 0,
-            mode: node.stat?.mode ?? 0o644,
-            newerRefTimes,
-          };
-          const evalResult = evaluateExpressionWithPrune(expr, evalCtx);
+          const evalStart = Date.now();
+          let evalResult: EvalResult;
+
+          // Use fast-path for simple expressions to avoid EvalContext allocation
+          if (isSimpleExpr) {
+            evalResult = evaluateSimpleExpression(
+              expr,
+              node.name,
+              node.relativePath,
+              node.isFile,
+              node.isDirectory,
+            );
+          } else {
+            const evalCtx: EvalContext = {
+              name: node.name,
+              relativePath: node.relativePath,
+              isFile: node.isFile,
+              isDirectory: node.isDirectory,
+              isEmpty: node.isEmpty,
+              mtime: node.stat?.mtime?.getTime() ?? Date.now(),
+              size: node.stat?.size ?? 0,
+              mode: node.stat?.mode ?? 0o644,
+              newerRefTimes,
+            };
+            evalResult = evaluateExpressionWithPrune(expr, evalCtx);
+          }
+
           matches = evalResult.matches;
           shouldPrint = hasExplicitPrint ? evalResult.printed : matches;
+          traceCounters.evalCalls++;
+          traceCounters.evalTime += Date.now() - evalStart;
         } else if (matches) {
           shouldPrint = true;
         }
@@ -454,10 +630,13 @@ export const findCommand: Command = {
 
           // BFS to discover all nodes with parallel processing
           while (workQueue.length > 0) {
+            const batchStart = Date.now();
             const batch = workQueue.splice(0, FIND_BATCH_SIZE);
             const nodes = await Promise.all(
               batch.map((q) => processNode(q.item)),
             );
+            traceCounters.batchCount++;
+            traceCounters.batchTime += Date.now() - batchStart;
 
             for (let i = 0; i < batch.length; i++) {
               const node = nodes[i];
@@ -558,6 +737,7 @@ export const findCommand: Command = {
 
           while (workQueue.length > 0) {
             // Process all items in the queue in parallel batches
+            const batchStart = Date.now();
             const batch = workQueue.splice(0, FIND_BATCH_SIZE);
             const processed: Array<NodeWithOrder | null> = await Promise.all(
               batch.map(async ({ item, orderIndex }) => {
@@ -565,6 +745,8 @@ export const findCommand: Command = {
                 return node ? { node, orderIndex } : null;
               }),
             );
+            traceCounters.batchCount++;
+            traceCounters.batchTime += Date.now() - batchStart;
 
             for (const result of processed) {
               if (!result) continue;
@@ -618,6 +800,21 @@ export const findCommand: Command = {
       const searchResult = await findIterative();
       results.push(...searchResult.paths);
       printfResults.push(...searchResult.printfData);
+
+      // Emit trace summary for this search path
+      if (ctx.trace) {
+        const totalMs = Date.now() - traceStartTime;
+        emitTraceSummary(ctx.trace, traceCounters, totalMs);
+        ctx.trace({
+          category: "find",
+          name: "searchPath",
+          durationMs: totalMs,
+          details: {
+            path: searchPath,
+            resultsFound: searchResult.paths.length,
+          },
+        });
+      }
     }
 
     let stdout = "";

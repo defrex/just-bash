@@ -34,6 +34,7 @@ import type {
   CommandContext,
   CommandRegistry,
   ExecResult,
+  TraceCallback,
 } from "../types.js";
 import { evaluateArithmetic, evaluateArithmeticSync } from "./arithmetic.js";
 import {
@@ -109,6 +110,8 @@ export interface InterpreterOptions {
   fetch?: SecureFetch;
   /** Optional sleep function for testing with mock clocks */
   sleep?: (ms: number) => Promise<void>;
+  /** Optional trace callback for performance profiling */
+  trace?: TraceCallback;
 }
 
 export class Interpreter {
@@ -126,6 +129,7 @@ export class Interpreter {
       executeCommand: this.executeCommand.bind(this),
       fetch: options.fetch,
       sleep: options.sleep,
+      trace: options.trace,
     };
   }
 
@@ -883,6 +887,7 @@ export class Interpreter {
       fetch: this.ctx.fetch,
       getRegisteredCommands: () => Array.from(this.ctx.commands.keys()),
       sleep: this.ctx.sleep,
+      trace: this.ctx.trace,
     };
 
     try {

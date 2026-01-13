@@ -43,6 +43,25 @@ export interface CommandExecOptions {
  * - `fetch` - Only when `network` option is configured in BashEnv
  * - `sleep` - Only when a custom sleep function is provided (e.g., for testing)
  */
+/**
+ * Performance trace event for profiling command execution
+ */
+export interface TraceEvent {
+  /** Event category (e.g., "find", "grep") */
+  category: string;
+  /** Event name (e.g., "readdir", "stat", "eval") */
+  name: string;
+  /** Duration in milliseconds */
+  durationMs: number;
+  /** Optional details (e.g., path, count) */
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Trace callback function for receiving performance events
+ */
+export type TraceCallback = (event: TraceEvent) => void;
+
 export interface CommandContext {
   /** Virtual filesystem interface for file operations */
   fs: IFileSystem;
@@ -57,6 +76,11 @@ export interface CommandContext {
    * Available when running commands via BashEnv interpreter.
    */
   limits?: Required<ExecutionLimits>;
+  /**
+   * Performance trace callback for profiling.
+   * If provided, commands emit timing events for analysis.
+   */
+  trace?: TraceCallback;
   /**
    * Execute a subcommand (e.g., for `xargs`, `bash -c`).
    * Available when running commands via BashEnv interpreter.

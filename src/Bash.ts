@@ -39,7 +39,12 @@ import {
   type SecureFetch,
 } from "./network/index.js";
 import { type ParseException, parse } from "./parser/parser.js";
-import type { BashExecResult, Command, CommandRegistry } from "./types.js";
+import type {
+  BashExecResult,
+  Command,
+  CommandRegistry,
+  TraceCallback,
+} from "./types.js";
 
 export type { ExecutionLimits } from "./limits.js";
 
@@ -117,6 +122,12 @@ export interface BashOptions {
    * Disabled by default.
    */
   logger?: BashLogger;
+  /**
+   * Optional trace callback for performance profiling.
+   * When provided, commands emit timing events for analysis.
+   * Useful for identifying performance bottlenecks.
+   */
+  trace?: TraceCallback;
 }
 
 export interface ExecOptions {
@@ -145,6 +156,7 @@ export class Bash {
   private limits: Required<ExecutionLimits>;
   private secureFetch?: SecureFetch;
   private sleepFn?: (ms: number) => Promise<void>;
+  private traceFn?: TraceCallback;
   private logger?: BashLogger;
 
   // Interpreter state (shared with interpreter instances)
@@ -190,6 +202,9 @@ export class Bash {
 
     // Store sleep function if provided (for mock clocks in testing)
     this.sleepFn = options.sleep;
+
+    // Store trace callback if provided (for performance profiling)
+    this.traceFn = options.trace;
 
     // Store logger if provided
     this.logger = options.logger;
@@ -355,6 +370,7 @@ export class Bash {
         exec: this.exec.bind(this),
         fetch: this.secureFetch,
         sleep: this.sleepFn,
+        trace: this.traceFn,
       };
 
       const interpreter = new Interpreter(interpreterOptions, execState);
